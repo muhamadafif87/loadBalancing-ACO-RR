@@ -1,385 +1,239 @@
 import random
-import math
 import numpy as np
 import matplotlib.pyplot as plt
-import csv
-import time
-from matplotlib.patches import Patch
+import pandas as pd
+import seaborn as sns
 
-# Konfigurasi untuk algoritma Ant Colony Optimization
-ALPHA = 1.0  # Bobot jejak request
-BETA = 2.0   # Bobot Heuristik (1/Load)
-EVAPORATION = 0.1
+# KONFIGURASI SIMULASI
+NUM_REQUESTS = 2000      # Jumlah request
+NUM_SERVERS = 10         # Jumlah server
+# Server Heterogen: 2 Server Kuat (Cap 50), 3 Sedang (Cap 20), 5 Lemah (Cap 5)
+SERVER_CAPACITIES = [50, 50, 20, 20, 20, 5, 5, 5, 5, 5] 
+
+# Parameter ACO
+ACO_ALPHA = 1.0          # Pengaruh Pheromone (Jejak)
+ACO_BETA = 2.5           # Pengaruh Heuristik (Kapasitas & Load saat ini) - Ditingkatkan
+ACO_RHO = 0.1            # Evaporation rate (Penguapan)
+ACO_Q = 100              # Konstanta update pheromone
 INIT_PHEROMONE = 1.0
-
 
 class Server:
     def __init__(self, server_id, capacity):
         self.id = server_id
-        self.capacity = capacity      # Kapasitas pemrosesan (unit/sec)
-        self.current_load = 0.0       # Total size tugas yang sedang mengantre
-        self.processed_time = 0.0     # Total waktu simulasi server saat bekerja
-        self.pheromone = INIT_PHEROMONE  # variable jejak request untuk Ant Colony Optimization
-        self.request_history = []     # Menyimpan riwayat beban untuk visualisasi
-        
-    def reset(self):
-        self.current_load = 0.0
-        self.processed_time = 0.0
+        self.capacity = capacity
+        self.current_load_size = 0.0  # Total size task dalam antrean
+        self.finish_time = 0.0        # Waktu kapan server ini akan bebas
         self.pheromone = INIT_PHEROMONE
-        self.request_history = []
+        self.task_count = 0
 
+    def process_request(self, request_size):
+        # Hitung waktu proses untuk request ini
+        processing_time = request_size / self.capacity
+        
+        # Response time = Waktu antri (finish_time saat ini) + Waktu proses
+        # Jika finish_time < waktu sekarang (0 untuk batch ini), maka mulai dari 0.
+        # Dalam simulasi batch, waiting time adalah akumulasi finish_time sebelumnya.
+        response_time = self.finish_time + processing_time
+        
+        # Update state server
+        self.finish_time += processing_time
+        self.current_load_size += request_size
+        self.task_count += 1
+        
+        return response_time
 
-class Request:
-    def __init__(self, request_id, size):
-        self.id = request_id
-        self.size = size  # Ukuran tugas (unit)
+    def reset(self):
+        self.current_load_size = 0.0
+        self.finish_time = 0.0
+        self.pheromone = INIT_PHEROMONE
+        self.task_count = 0
 
+class LoadBalancerSim:
+    def __init__(self, requests):
+        self.requests = requests # List of request sizes
+        self.servers = [Server(i, cap) for i, cap in enumerate(SERVER_CAPACITIES)]
 
-def reset_servers(servers):
-    for server in servers:
-        server.reset()
+    def reset_servers(self):
+        for s in self.servers:
+            s.reset()
 
+    # -------------------------------------------------------
+    # 1. ALGORITMA ROUND ROBIN
+    # -------------------------------------------------------
+    def run_round_robin(self):
+        self.reset_servers()
+        response_times = []
+        
+        print(f"[*] Menjalankan Round Robin pada {len(self.requests)} requests...")
+        
+        for i, req_size in enumerate(self.requests):
+            # Pilih server secara berurutan (Blind Allocation)
+            server_idx = i % NUM_SERVERS
+            selected_server = self.servers[server_idx]
+            
+            rt = selected_server.process_request(req_size)
+            response_times.append(rt)
+            
+        return self.calculate_metrics("Round Robin", response_times)
 
-def save_results_to_csv(filename, rr_results, aco_results):
-    with open(filename, 'w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(["Algorithm", "ResponseTime", "Variance", "Throughput", "Step"])
+    # -------------------------------------------------------
+    # 2. ALGORITMA ANT COLONY OPTIMIZATION (REFACTORED)
+    # -------------------------------------------------------
+    def run_aco(self):
+        self.reset_servers()
+        response_times = []
         
-        # Simpan data RR
-        for i, (rt, var, thr) in enumerate(zip(rr_results['response_times'], 
-                                               rr_results['variances'], 
-                                               rr_results['throughputs'])):
-            writer.writerow(["RoundRobin", rt, var, thr, i])
+        print(f"[*] Menjalankan ACO pada {len(self.requests)} requests...")
         
-        # Simpan data ACO
-        for i, (rt, var, thr) in enumerate(zip(aco_results['response_times'], 
-                                               aco_results['variances'], 
-                                               aco_results['throughputs'])):
-            writer.writerow(["ACO", rt, var, thr, i])
-
-
-def plot_comparison_results(rr_results, aco_results):
-    # Buat figure dengan 4 subplot
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # Data untuk plotting
-    steps_rr = list(range(len(rr_results['response_times'])))
-    steps_aco = list(range(len(aco_results['response_times'])))
-    
-    # Plot 1: Response Time Comparison
-    ax1 = axes[0, 0]
-    if len(steps_rr) > 1:
-        ax1.plot(steps_rr, rr_results['response_times'], 'r-', label='Round Robin', linewidth=2)
-    else:
-        ax1.plot(steps_rr, rr_results['response_times'], 'ro', label='Round Robin', markersize=8)
-    
-    if len(steps_aco) > 1:
-        ax1.plot(steps_aco, aco_results['response_times'], 'b-', label='Ant Colony', linewidth=2)
-    else:
-        ax1.plot(steps_aco, aco_results['response_times'], 'bs', label='Ant Colony', markersize=8)
-    
-    ax1.set_title("Response Time Comparison", fontsize=14, fontweight='bold')
-    ax1.set_xlabel("Simulation Step")
-    ax1.set_ylabel("Time (ms/unit)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Load Variance Comparison
-    ax2 = axes[0, 1]
-    if len(steps_rr) > 1:
-        ax2.plot(steps_rr, rr_results['variances'], 'g-', label='Round Robin', linewidth=2)
-    else:
-        ax2.plot(steps_rr, rr_results['variances'], 'go', label='Round Robin', markersize=8)
-    
-    if len(steps_aco) > 1:
-        ax2.plot(steps_aco, aco_results['variances'], 'm-', label='Ant Colony', linewidth=2)
-    else:
-        ax2.plot(steps_aco, aco_results['variances'], 'ms', label='Ant Colony', markersize=8)
-    
-    ax2.set_title("Load Variance Comparison", fontsize=14, fontweight='bold')
-    ax2.set_xlabel("Simulation Step")
-    ax2.set_ylabel("Variance")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # Plot 3: Throughput Comparison
-    ax3 = axes[1, 0]
-    if len(steps_rr) > 1:
-        ax3.plot(steps_rr, rr_results['throughputs'], 'c-', label='Round Robin', linewidth=2)
-    else:
-        ax3.plot(steps_rr, rr_results['throughputs'], 'co', label='Round Robin', markersize=8)
-    
-    if len(steps_aco) > 1:
-        ax3.plot(steps_aco, aco_results['throughputs'], 'y-', label='Ant Colony', linewidth=2)
-    else:
-        ax3.plot(steps_aco, aco_results['throughputs'], 'ys', label='Ant Colony', markersize=8)
-    
-    ax3.set_title("Throughput Comparison", fontsize=14, fontweight='bold')
-    ax3.set_xlabel("Simulation Step")
-    ax3.set_ylabel("Requests/sec")
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    # Plot 4: Server Load Distribution (Bar Chart)
-    ax4 = axes[1, 1]
-    
-    # Ambil data beban server terakhir
-    if rr_results['server_loads'] and aco_results['server_loads']:
-        server_ids = list(range(len(rr_results['server_loads'])))
-        rr_loads = rr_results['server_loads']
-        aco_loads = aco_results['server_loads']
-        
-        bar_width = 0.35
-        x = np.arange(len(server_ids))
-        
-        ax4.bar(x - bar_width/2, rr_loads, bar_width, label='Round Robin', color='red', alpha=0.7)
-        ax4.bar(x + bar_width/2, aco_loads, bar_width, label='Ant Colony', color='blue', alpha=0.7)
-        
-        ax4.set_title("Final Server Load Distribution", fontsize=14, fontweight='bold')
-        ax4.set_xlabel("Server ID")
-        ax4.set_ylabel("Load (units)")
-        ax4.set_xticks(x)
-        ax4.set_xticklabels(server_ids, rotation=45)
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
-    
-    plt.suptitle("Load Balancing Algorithms Comparison", fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.show()
-
-
-def calculate_variance(servers):
-    sum_load = sum(server.current_load for server in servers)
-    mean_load = sum_load / len(servers)
-    
-    temp = 0
-    for server in servers:
-        temp += (server.current_load - mean_load) ** 2
-    
-    return temp / len(servers)
-
-
-def run_round_robin(servers, requests, batch_size=1000):
-    print("--- Menjalankan Round Robin ---")
-    
-    # Buat salinan server
-    servers_copy = []
-    for server in servers:
-        new_server = Server(server.id, server.capacity)
-        new_server.current_load = 0
-        servers_copy.append(new_server)
-    
-    total_response_time = 0.0
-    server_count = len(servers_copy)
-    
-    response_times = []
-    variances = []
-    throughputs = []
-    
-    # Proses request dalam batch untuk mendapatkan data bertahap
-    for batch_start in range(0, len(requests), batch_size):
-        batch_end = min(batch_start + batch_size, len(requests))
-        batch_requests = requests[batch_start:batch_end]
-        
-        batch_response_time = 0.0
-        
-        for i, request in enumerate(batch_requests):
-            server_index = i % server_count
-            processing_time = request.size / servers_copy[server_index].capacity
-            servers_copy[server_index].current_load += request.size
-            batch_response_time += processing_time
-        
-        total_response_time += batch_response_time
-        
-        # Hitung metrik untuk batch ini
-        avg_response_time = total_response_time / batch_end
-        variance = calculate_variance(servers_copy)
-        
-        # Hitung throughput
-        max_load_time = 0.0
-        for server in servers_copy:
-            time_needed = server.current_load / server.capacity
-            if time_needed > max_load_time:
-                max_load_time = time_needed
-        
-        throughput = batch_end / max_load_time if max_load_time > 0 else 0
-        
-        response_times.append(avg_response_time)
-        variances.append(variance)
-        throughputs.append(throughput)
-    
-    # Ambil beban server akhir untuk visualisasi
-    final_loads = [server.current_load for server in servers_copy]
-    
-    print(f"Final Results:")
-    print(f"Avg Response Time: {response_times[-1]:.4f} ms/unit")
-    print(f"Load Variance    : {variances[-1]:.4f}")
-    print(f"Est. Throughput  : {throughputs[-1]:.4f} req/sec")
-    print("-------------------------------")
-    
-    return {
-        'response_times': response_times,
-        'variances': variances,
-        'throughputs': throughputs,
-        'server_loads': final_loads
-    }
-
-
-def run_aco(servers, requests, batch_size=1000):
-    print("--- Menjalankan Ant Colony Optimization ---")
-    
-    # Buat salinan server
-    servers_copy = []
-    for server in servers:
-        new_server = Server(server.id, server.capacity)
-        new_server.current_load = 0
-        new_server.pheromone = INIT_PHEROMONE
-        servers_copy.append(new_server)
-    
-    total_response_time = 0.0
-    
-    response_times = []
-    variances = []
-    throughputs = []
-    
-    # Proses request dalam batch
-    for batch_start in range(0, len(requests), batch_size):
-        batch_end = min(batch_start + batch_size, len(requests))
-        batch_requests = requests[batch_start:batch_end]
-        
-        batch_response_time = 0.0
-        
-        for request in batch_requests:
+        for req_size in self.requests:
             probabilities = []
             sum_prob = 0.0
             
-            for server in servers_copy:
-                visibility = 1.0 / (server.current_load + 0.1)
-                prob = (server.pheromone ** ALPHA) * (visibility ** BETA)
+            # --- STEP 1: Hitung Probabilitas Pindah ke Tiap Server ---
+            for server in self.servers:
+                # [FIX LOGIC] Heuristik:
+                # Code lama: 1 / load. 
+                # Code baru: Capacity / (CurrentLoad + 1).
+                # Ini memprioritaskan server kapasitas besar yg load-nya masih rendah.
+                heuristic = server.capacity / (server.finish_time + 1.0)
+                
+                # Rumus ACO standar
+                prob = (server.pheromone ** ACO_ALPHA) * (heuristic ** ACO_BETA)
                 probabilities.append(prob)
                 sum_prob += prob
             
-            r = random.random() * sum_prob
-            selected_server_index = -1
-            cumulative = 0.0
+            # Normalisasi probabilitas
+            probabilities = [p / sum_prob for p in probabilities]
             
-            for i, prob in enumerate(probabilities):
-                cumulative += prob
-                if r <= cumulative:
-                    selected_server_index = i
-                    break
+            # --- STEP 2: Roulette Wheel Selection ---
+            # Semut memilih server berdasarkan probabilitas
+            selected_server = random.choices(self.servers, weights=probabilities, k=1)[0]
             
-            if selected_server_index == -1:
-                selected_server_index = len(servers_copy) - 1
+            # --- STEP 3: Eksekusi Request ---
+            rt = selected_server.process_request(req_size)
+            response_times.append(rt)
             
-            selected_server = servers_copy[selected_server_index]
-            processing_time = request.size / selected_server.capacity
-            selected_server.current_load += request.size
-            batch_response_time += processing_time
-            
-            deposit = 1.0 / (selected_server.current_load + 1.0)
-            
-            for server in servers_copy:
-                server.pheromone = (1.0 - EVAPORATION) * server.pheromone
-            
-            selected_server.pheromone += deposit
-        
-        total_response_time += batch_response_time
-        
-        # Hitung metrik untuk batch ini
-        avg_response_time = total_response_time / batch_end
-        variance = calculate_variance(servers_copy)
-        
-        # Hitung throughput
-        max_load_time = 0.0
-        for server in servers_copy:
-            time_needed = server.current_load / server.capacity
-            if time_needed > max_load_time:
-                max_load_time = time_needed
-        
-        throughput = batch_end / max_load_time if max_load_time > 0 else 0
-        
-        response_times.append(avg_response_time)
-        variances.append(variance)
-        throughputs.append(throughput)
-    
-    # Ambil beban server akhir untuk visualisasi
-    final_loads = [server.current_load for server in servers_copy]
-    
-    print(f"Final Results:")
-    print(f"Avg Response Time: {response_times[-1]:.4f} ms/unit")
-    print(f"Load Variance    : {variances[-1]:.4f}")
-    print(f"Est. Throughput  : {throughputs[-1]:.4f} req/sec")
-    print("-------------------------------")
-    
-    return {
-        'response_times': response_times,
-        'variances': variances,
-        'throughputs': throughputs,
-        'server_loads': final_loads
-    }
+            # --- STEP 4: Local Pheromone Update ---
+            # Mengurangi pheromone di jalur yang baru dilewati (agar semut lain explore)
+            # Atau menambah jika hasilnya bagus. Disini kita pakai Global Update saja di akhir batch
+            # tapi kita bisa update sedikit agar adaptif thd load yg baru masuk.
+            selected_server.pheromone = (1 - ACO_RHO) * selected_server.pheromone + \
+                                        (ACO_RHO * (ACO_Q / (selected_server.finish_time + 1.0)))
 
+        return self.calculate_metrics("ACO", response_times)
 
-def main():
-    # --- 1. Setup Parameter ---
-    num_servers = 30
-    num_requests = 10000
-    
-    # Inisialisasi server heterogen
-    servers = []
-    for i in range(num_servers):
-        capacity = 20.0 if i < 2 else 10.0  # 2 server dengan kapasitas tinggi
-        servers.append(Server(i, capacity))
-    
-    # Inisialisasi requests
-    random.seed(time.time())
-    requests = []
-    for i in range(num_requests):
-        size = 10 + random.randint(0, 90)  # Ukuran antara 10-100
-        requests.append(Request(i, size))
-    
-    print(f"Simulasi Load Balancing: {num_requests} requests ke {num_servers} servers.")
-    print("Kondisi: Server Heterogen (Kapasitas berbeda).\n")
-    
-    # Jalankan kedua algoritma
-    print("\n" + "="*50)
-    rr_results = run_round_robin(servers, requests, batch_size=1000)
-    
-    print("\n" + "="*50)
-    reset_servers(servers)
-    aco_results = run_aco(servers, requests, batch_size=1000)
-    
-    # Simpan dan tampilkan hasil
-    save_results_to_csv("results_comparison.csv", rr_results, aco_results)
-    plot_comparison_results(rr_results, aco_results)
-    
-    # Tampilkan tabel perbandingan akhir
-    print("\n" + "="*60)
-    print("=== PERBANDINGAN AKHIR HASIL ===")
-    print("="*60)
-    print(f"{'METRIC':<20} {'ROUND ROBIN':<15} {'ANT COLONY':<15} {'DIFFERENCE':<15}")
-    print("-"*65)
-    
-    rr_rt = rr_results['response_times'][-1]
-    aco_rt = aco_results['response_times'][-1]
-    rt_diff = aco_rt - rr_rt
-    rt_better = "ACO" if aco_rt < rr_rt else "RR"
-    
-    rr_var = rr_results['variances'][-1]
-    aco_var = aco_results['variances'][-1]
-    var_diff = aco_var - rr_var
-    var_better = "ACO" if aco_var < rr_var else "RR"
-    
-    rr_thr = rr_results['throughputs'][-1]
-    aco_thr = aco_results['throughputs'][-1]
-    thr_diff = aco_thr - rr_thr
-    thr_better = "ACO" if aco_thr > rr_thr else "RR"
-    
-    print(f"{'Response Time':<20} {rr_rt:<15.4f} {aco_rt:<15.4f} {rt_diff:<15.4f} ({rt_better} better)")
-    print(f"{'Load Variance':<20} {rr_var:<15.4f} {aco_var:<15.4f} {var_diff:<15.4f} ({var_better} better)")
-    print(f"{'Throughput':<20} {rr_thr:<15.4f} {aco_thr:<15.4f} {thr_diff:<15.4f} ({thr_better} better)")
-    print("="*60)
+    def calculate_metrics(self, algo_name, response_times):
+        # 1. Average Response Time (Lower is Better)
+        avg_rt = np.mean(response_times)
+        
+        # 2. Makespan (Waktu total penyelesaian batch, Lower is Better)
+        makespan = max(s.finish_time for s in self.servers)
+        
+        # 3. Throughput (Requests per Second based on Makespan)
+        # Higher is Better
+        throughput = len(self.requests) / makespan if makespan > 0 else 0
+        
+        # 4. Imbalance (Standard Deviation of Server Finish Times)
+        # Menunjukkan seberapa timpang beban antar server
+        server_loads = [s.finish_time for s in self.servers]
+        load_variance = np.var(server_loads)
+        
+        return {
+            "Algorithm": algo_name,
+            "Avg Response Time": avg_rt,
+            "Throughput": throughput,
+            "Load Variance": load_variance,
+            "Makespan": makespan,
+            "Server Loads": [s.finish_time for s in self.servers],
+            "Task Counts": [s.task_count for s in self.servers]
+        }
 
-
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    main()
+    # Generate random requests (Size 10 - 100)
+    print("Generating requests...")
+    np.random.seed(42) # Agar hasil reproducible
+    requests_data = np.random.randint(10, 100, size=NUM_REQUESTS)
+
+    sim = LoadBalancerSim(requests_data)
+    
+    # Run Simulations
+    rr_metrics = sim.run_round_robin()
+    aco_metrics = sim.run_aco()
+
+    # ==========================================
+    # PRINT RESULTS TABLE
+    # ==========================================
+    results_df = pd.DataFrame([rr_metrics, aco_metrics])
+    cols = ["Algorithm", "Avg Response Time", "Throughput", "Load Variance", "Makespan"]
+    print("\n" + "="*60)
+    print("HASIL KOMPARASI PERFORMA (Lower RT/Var & Higher TP is Better)")
+    print("="*60)
+    print(results_df[cols].to_string(index=False))
+    print("="*60)
+
+    # Analisis Singkat Otomatis
+    if aco_metrics["Avg Response Time"] < rr_metrics["Avg Response Time"]:
+        print("\n[KESIMPULAN] ACO Terbukti Lebih Unggul ✅")
+        print(f"ACO {rr_metrics['Avg Response Time']/aco_metrics['Avg Response Time']:.2f}x lebih cepat daripada Round Robin.")
+    else:
+        print("\n[KESIMPULAN] ACO Masih Kalah ❌ (Cek parameter beta/alpha)")
+
+    # ==========================================
+    # VISUALISASI
+    # ==========================================
+    
+    # 1. Bar Chart: Server Load Distribution (Waktu Selesai tiap Server)
+    # Ini membuktikan apakah beban terbagi sesuai kapasitas
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    indices = np.arange(NUM_SERVERS)
+    width = 0.35
+    
+    # Urutkan server berdasarkan ID agar terlihat mana yg High Cap dan Low Cap
+    # Ingat: Server 0-1 (High Cap), 2-4 (Med), 5-9 (Low)
+    
+    rects1 = ax.bar(indices - width/2, rr_metrics["Server Loads"], width, label='Round Robin', color='salmon')
+    rects2 = ax.bar(indices + width/2, aco_metrics["Server Loads"], width, label='ACO', color='skyblue')
+    
+    ax.set_xlabel('Server ID (0-1: High Cap, 2-4: Med, 5-9: Low)')
+    ax.set_ylabel('Total Finish Time (Load)')
+    ax.set_title('Distribusi Beban Akhir per Server (Semakin Rata Semakin Baik)')
+    ax.set_xticks(indices)
+    ax.legend()
+    
+    # Tambahkan text kapasitas di atas bar
+    def autolabel(rects):
+        for i, rect in enumerate(rects):
+            height = rect.get_height()
+            cap = SERVER_CAPACITIES[i]
+            # ax.annotate(f'Cap:{cap}',
+            #             xy=(rect.get_x() + rect.get_width() / 2, height),
+            #             xytext=(0, 3),  # 3 points vertical offset
+            #             textcoords="offset points",
+            #             ha='center', va='bottom', fontsize=8, rotation=90)
+
+    autolabel(rects1)
+    autolabel(rects2)
+    
+    plt.tight_layout()
+    plt.show()
+
+    # 2. Visualisasi Performance Metrics Comparison
+    metrics_to_plot = ["Avg Response Time", "Load Variance"]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    for i, metric in enumerate(metrics_to_plot):
+        vals = [rr_metrics[metric], aco_metrics[metric]]
+        axes[i].bar(["Round Robin", "ACO"], vals, color=['salmon', 'skyblue'])
+        axes[i].set_title(metric)
+        axes[i].set_ylabel("Value (Lower is Better)")
+        
+        # Add labels
+        for j, v in enumerate(vals):
+            axes[i].text(j, v, f"{v:.2f}", ha='center', va='bottom')
+
+    plt.tight_layout()
+    plt.show()
